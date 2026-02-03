@@ -18,9 +18,48 @@ st.markdown(
     @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap');
     :root {
         --font: "Noto Sans KR", sans-serif;
+        --bg1: #f8fbff;
+        --bg2: #eef5ff;
+        --card: #ffffff;
+        --border: #dbe7ff;
+        --accent: #1d4ed8;
     }
     html, body, .stApp, [class*="st-"], [class*="css"] {
         font-family: "Noto Sans KR", sans-serif !important;
+    }
+    .stApp {
+        background: linear-gradient(180deg, var(--bg1) 0%, var(--bg2) 100%);
+    }
+    div[data-testid="metric-container"] {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 10px 14px;
+        box-shadow: 0 2px 8px rgba(29, 78, 216, 0.06);
+    }
+    div[data-testid="metric-container"] label {
+        color: #475569 !important;
+        font-weight: 600 !important;
+    }
+    div[data-testid="metric-container"] [data-testid="stMetricValue"] {
+        color: #0f172a;
+    }
+    button[data-baseweb="tab"] {
+        font-weight: 700;
+        color: #334155;
+    }
+    button[data-baseweb="tab"][aria-selected="true"] {
+        color: var(--accent);
+        background: #eaf2ff;
+        border-radius: 8px;
+    }
+    div[data-testid="stTextInput"] input {
+        border: 1px solid #bfdbfe;
+        background: #f8fbff;
+    }
+    div[data-testid="stTextInput"] input:focus {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 1px var(--accent);
     }
     </style>
     """,
@@ -78,6 +117,23 @@ def extract_pack_count(name: object) -> float:
     return np.nan
 
 
+def normalize_product_family_name(name: object) -> str:
+    if pd.isna(name):
+        return ""
+    text = str(name).strip()
+    if not text:
+        return ""
+    # leading quantity token (e.g. 10팩_Iris ...)
+    text = re.sub(r"(?i)^\s*\d{1,3}\s*(팩|P|개입)\s*[_\-\s]*", "", text)
+    # trailing quantity token (e.g. ..._40팩, ..._30P, ..._30개입)
+    text = re.sub(r"(?i)[_\-\s]*\d{1,3}\s*(팩|P|개입)\s*$", "", text)
+    # trailing bare numeric token (e.g. ..._30)
+    text = re.sub(r"(?i)[_\-\s]*\d{1,3}\s*$", "", text)
+    text = re.sub(r"[_\-]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
 def summarize_pack_counts(values: pd.Series, max_units: int = 4) -> str:
     nums = pd.to_numeric(values, errors="coerce").dropna()
     units = sorted({int(v) for v in nums if int(v) > 0})
@@ -114,6 +170,24 @@ def summarize_codes(values: pd.Series, max_codes: int = 5) -> str:
     return ", ".join(seen[:max_codes]) + f" 외 {len(seen) - max_codes}"
 
 
+def merge_text_values(*values: object) -> str:
+    out = []
+    for v in values:
+        s = str(v).strip()
+        if not s or s == "0":
+            continue
+        if s not in out:
+            out.append(s)
+    return ", ".join(out)
+
+
+def normalize_key_value(value: object) -> str:
+    s = str(value).strip()
+    if s.lower() in {"", "0", "nan", "none"}:
+        return ""
+    return s
+
+
 @st.cache_data
 def load_data(base_dir: str) -> tuple[pd.DataFrame, pd.DataFrame, str, str]:
     files = list(Path(base_dir).glob("*.xlsx"))
@@ -145,12 +219,46 @@ def load_data(base_dir: str) -> tuple[pd.DataFrame, pd.DataFrame, str, str]:
     return request_df, inbound_df, request_file, inbound_file
 
 
+@st.cache_data
+def load_item_product_master_map(base_dir: str) -> pd.DataFrame:
+    candidates = list(Path(base_dir).glob("*마스터 데이터*.xlsx"))
+    if not candidates:
+        return pd.DataFrame(columns=["품목코드", "제품코드(마스터)"])
+
+    for file in candidates:
+        try:
+            df = pd.read_excel(file)
+        except Exception:
+            continue
+
+        item_col = find_col(df, ["품목코드"])
+        product_col = find_col(df, ["제품코드"])
+        if not item_col or not product_col:
+            continue
+
+        mapping = df[[item_col, product_col]].copy()
+        mapping.columns = ["품목코드", "제품코드(마스터)"]
+        mapping["품목코드"] = normalize_code(mapping["품목코드"])
+        mapping["제품코드(마스터)"] = mapping["제품코드(마스터)"].fillna("").astype(str).str.strip()
+        mapping = mapping[(mapping["품목코드"] != "")]
+        mapping = (
+            mapping.groupby("품목코드", as_index=False)["제품코드(마스터)"]
+            .apply(summarize_codes)
+            .rename(columns={"제품코드(마스터)": "제품코드(마스터)"})
+        )
+        mapping["제품코드(마스터)"] = mapping["제품코드(마스터)"].fillna("")
+        return mapping
+
+    return pd.DataFrame(columns=["품목코드", "제품코드(마스터)"])
+
+
 def prepare_request(df: pd.DataFrame) -> pd.DataFrame:
     year_col = find_col(df, ["년"])
     quarter_col = find_col(df, ["분기"])
     item_col = find_col(df, ["품목코드"])
     name_col = find_col(df, ["품명"])
     pcode_col = find_col(df, ["P 코드", "P코드"])
+    brand_col = find_col(df, ["브랜드", "BRAND", "Brand"])
 
     if not (year_col and quarter_col and item_col):
         raise ValueError("요청 파일에 필수 컬럼(년/분기/품목코드)이 없습니다.")
@@ -167,7 +275,9 @@ def prepare_request(df: pd.DataFrame) -> pd.DataFrame:
     req["품목코드"] = normalize_code(req[item_col])
     req["제품코드"] = req["품목코드"].str[:4]
     req["P코드"] = req[pcode_col] if pcode_col else ""
+    req["브랜드"] = req[brand_col] if brand_col else ""
     req["품명"] = req[name_col] if name_col else ""
+    req["제품군명"] = req["품명"].apply(normalize_product_family_name)
     req["PACK당낱개수"] = req["품명"].apply(extract_pack_count)
 
     if quarter_total_cols:
@@ -176,7 +286,7 @@ def prepare_request(df: pd.DataFrame) -> pd.DataFrame:
         qty_numeric = req[qty_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
         req["요청수량_PACK"] = qty_numeric.sum(axis=1)
 
-    return req[["년", "분기", "품목코드", "제품코드", "P코드", "품명", "PACK당낱개수", "요청수량_PACK"]]
+    return req[["년", "분기", "품목코드", "제품코드", "P코드", "브랜드", "품명", "제품군명", "PACK당낱개수", "요청수량_PACK"]]
 
 
 def prepare_inbound(df: pd.DataFrame) -> pd.DataFrame:
@@ -195,12 +305,14 @@ def prepare_inbound(df: pd.DataFrame) -> pd.DataFrame:
     inbound["분기"] = pd.to_numeric(inbound[quarter_col], errors="coerce").astype("Int64")
     inbound["품목코드"] = normalize_code(inbound[item_col])
     inbound["제품코드"] = inbound["품목코드"].str[:4]
+    inbound["브랜드"] = ""
     inbound["품명"] = inbound[name_col] if name_col else ""
+    inbound["제품군명"] = inbound["품명"].apply(normalize_product_family_name)
     inbound["PACK당낱개수"] = inbound["품명"].apply(extract_pack_count)
     inbound["출고수량_EA"] = to_numeric(inbound[qty_col])
     inbound["이동일자"] = pd.to_datetime(inbound[date_col], errors="coerce") if date_col else pd.NaT
 
-    return inbound[["년", "분기", "품목코드", "제품코드", "품명", "PACK당낱개수", "이동일자", "출고수량_EA"]]
+    return inbound[["년", "분기", "품목코드", "제품코드", "브랜드", "품명", "제품군명", "PACK당낱개수", "이동일자", "출고수량_EA"]]
 
 
 def status_label(request_qty: pd.Series, shipped_qty: pd.Series) -> pd.Series:
@@ -244,9 +356,12 @@ def format_table(
     int_cols: list[str],
     pct_cols: list[str] | None = None,
     progress_bar_cols: list[str] | None = None,
+    status_col: str | None = None,
+    positive_alert_cols: list[str] | None = None,
 ):
     pct_cols = pct_cols or []
     progress_bar_cols = progress_bar_cols or []
+    positive_alert_cols = positive_alert_cols or []
     fmt = {c: "{:,.0f}" for c in int_cols if c in df.columns}
     fmt.update({c: "{:,.1f}" for c in pct_cols if c in df.columns})
     styler = df.style.format(fmt, na_rep="")
@@ -254,6 +369,30 @@ def format_table(
         if c in df.columns:
             # 100%를 가득 찬 기준으로 시각화(초과값은 막대가 가득 찬 상태로 표시)
             styler = styler.bar(subset=[c], vmin=0, vmax=100, color="#93c5fd")
+
+    if status_col and status_col in df.columns:
+        status_style_map = {
+            "미출고": "background-color:#fee2e2;color:#991b1b;font-weight:700;",
+            "출고중": "background-color:#fef3c7;color:#92400e;font-weight:700;",
+            "출고완료": "background-color:#dcfce7;color:#166534;font-weight:700;",
+            "요청초과출고": "background-color:#ffedd5;color:#9a3412;font-weight:700;",
+            "요청없음(출고발생)": "background-color:#e2e8f0;color:#334155;font-weight:700;",
+            "확인필요": "background-color:#f1f5f9;color:#334155;font-weight:700;",
+        }
+        styler = styler.applymap(lambda v: status_style_map.get(str(v), ""), subset=[status_col])
+
+    def style_positive(v: object) -> str:
+        num = pd.to_numeric(pd.Series([v]), errors="coerce").iloc[0]
+        if pd.isna(num):
+            return ""
+        if float(num) > 0:
+            return "color:#b91c1c;font-weight:700;"
+        return ""
+
+    for c in positive_alert_cols:
+        if c in df.columns:
+            styler = styler.applymap(style_positive, subset=[c])
+
     return styler
 
 
@@ -287,6 +426,33 @@ def to_excel_bytes(df: pd.DataFrame, sheet_name: str = "data") -> bytes:
     return buffer.getvalue()
 
 
+def render_color_metric(
+    container,
+    label: str,
+    value: str,
+    bg_color: str,
+    border_color: str,
+    label_color: str = "#1e3a8a",
+    value_color: str = "#0f172a",
+) -> None:
+    container.markdown(
+        f"""
+        <div style="
+            background:{bg_color};
+            border:1px solid {border_color};
+            border-radius:12px;
+            padding:10px 14px;
+            box-shadow:0 2px 8px rgba(37, 99, 235, 0.08);
+            min-height:98px;
+        ">
+            <div style="font-size:0.95rem;color:{label_color};font-weight:700;">{label}</div>
+            <div style="font-size:2.15rem;color:{value_color};font-weight:700;line-height:1.2;margin-top:6px;">{value}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def apply_chart_style(chart: alt.Chart) -> alt.Chart:
     return (
         chart.configure_axis(
@@ -310,6 +476,7 @@ def apply_chart_style(chart: alt.Chart) -> alt.Chart:
 
 try:
     req_raw, inbound_raw, req_file, inbound_file = load_data(".")
+    item_product_master = load_item_product_master_map(".")
     req = prepare_request(req_raw)
     inbound = prepare_inbound(inbound_raw)
 except Exception as e:
@@ -357,13 +524,16 @@ pcode_prod = (
 prod = prod.merge(pcode_prod, on=["년", "분기", "제품코드"], how="left")
 prod["P코드"] = prod["P코드"].fillna("")
 
-name_src = pd.concat(
-    [
-        req_f[["년", "분기", "제품코드", "품명"]],
-        in_f[["년", "분기", "제품코드", "품명"]],
-    ],
-    ignore_index=True,
+brand_prod = (
+    req_f.groupby(["년", "분기", "제품코드"], as_index=False)["브랜드"]
+    .apply(summarize_codes)
+    .rename(columns={"브랜드": "브랜드"})
 )
+prod = prod.merge(brand_prod, on=["년", "분기", "제품코드"], how="left")
+prod["브랜드"] = prod["브랜드"].fillna("").astype(str).replace("0", "")
+
+# 제품명코드 요약의 품명은 요청 파일 기준으로만 표시
+name_src = req_f[["년", "분기", "제품코드", "품명"]].copy()
 prod_names = (
     name_src.groupby(["년", "분기", "제품코드"], as_index=False)["품명"]
     .apply(summarize_names)
@@ -416,6 +586,8 @@ in_item = in_f.groupby(["년", "분기", "품목코드"], as_index=False).agg(
 )
 item = req_item.merge(in_item, on=["년", "분기", "품목코드"], how="outer", suffixes=("_요청", "_출고")).fillna(0)
 item["품명"] = np.where(item["품명_요청"].astype(str) != "0", item["품명_요청"], item["품명_출고"])
+item["품명검색"] = item.apply(lambda r: merge_text_values(r["품명_요청"], r["품명_출고"]), axis=1)
+item["제품군명"] = item["품명검색"].apply(normalize_product_family_name)
 item["제품코드"] = item["품목코드"].astype(str).str[:4]
 pcode_item = (
     req_f.groupby(["년", "분기", "품목코드"], as_index=False)["P코드"]
@@ -424,6 +596,14 @@ pcode_item = (
 )
 item = item.merge(pcode_item, on=["년", "분기", "품목코드"], how="left")
 item["P코드"] = item["P코드"].fillna("")
+
+brand_item = (
+    req_f.groupby(["년", "분기", "품목코드"], as_index=False)["브랜드"]
+    .apply(summarize_codes)
+    .rename(columns={"브랜드": "브랜드"})
+)
+item = item.merge(brand_item, on=["년", "분기", "품목코드"], how="left")
+item["브랜드"] = item["브랜드"].fillna("").astype(str).replace("0", "")
 
 pack_src_item = pd.concat(
     [
@@ -459,13 +639,57 @@ item["초과출고수량_낱개"] = np.maximum(item_ship_piece - item_req_piece,
 item["잔량_낱개"] = np.maximum(item_req_piece - item_ship_piece, 0)
 
 item = add_progress_columns(item, "요청수량_PACK", "출고수량_EA")
+item = item.merge(item_product_master, on="품목코드", how="left")
+item["제품코드(마스터)"] = item["제품코드(마스터)"].fillna("")
 
-global_search = st.text_input(
-    "통합 검색 (OR)",
-    "",
-    placeholder="예: S036, Bandage, 미출고",
+# 동일제품 통합(낱개 기준) 요약
+# 집계 우선순위: 제품코드(마스터) -> (마스터코드가 비어있을 때만) P코드 -> 제품군명(최후 fallback)
+family_src = item.copy()
+family_src["제품코드_집계"] = family_src["제품코드(마스터)"].apply(normalize_key_value)
+family_src["P코드_집계"] = family_src["P코드"].apply(normalize_key_value)
+family_src["제품군명_집계"] = family_src["제품군명"].apply(normalize_key_value)
+family_src["집계기준"] = np.where(
+    family_src["제품코드_집계"] != "",
+    "제품코드(마스터)",
+    np.where(family_src["P코드_집계"] != "", "P코드", "제품군명"),
 )
-st.caption("쉼표(,) 또는 | 또는 / 로 키워드를 구분하면 OR 조건으로 검색합니다.")
+family_src["집계키"] = np.where(
+    family_src["제품코드_집계"] != "",
+    family_src["제품코드_집계"],
+    np.where(family_src["P코드_집계"] != "", family_src["P코드_집계"], family_src["제품군명_집계"]),
+)
+family_src["집계키"] = family_src["집계키"].replace("", "(미분류)")
+family_src["통합키"] = family_src["집계기준"] + ":" + family_src["집계키"]
+
+family = (
+    family_src.groupby(["년", "분기", "집계기준", "집계키", "통합키"], as_index=False)
+    .agg(
+        제품군명=("제품군명", summarize_names),
+        대표품명=("품명", summarize_names),
+        제품코드목록=("제품코드", summarize_codes),
+        P코드=("P코드", summarize_codes),
+        브랜드=("브랜드", summarize_codes),
+        요청수량_PACK=("요청수량_PACK", "sum"),
+        총출고수량_EA=("총출고수량_EA", "sum"),
+        요청수량_낱개=("요청수량_낱개", "sum"),
+        총출고수량_낱개=("출고수량_낱개", "sum"),
+    )
+)
+family["제품군명"] = family["제품군명"].apply(normalize_key_value).replace("", "(미분류)")
+family["대표품명"] = family["대표품명"].apply(normalize_key_value)
+family["제품코드목록"] = family["제품코드목록"].apply(normalize_key_value)
+family["P코드"] = family["P코드"].apply(normalize_key_value)
+family["브랜드"] = family["브랜드"].apply(normalize_key_value)
+
+family = add_progress_columns(family, "요청수량_PACK", "총출고수량_EA")
+family_req_piece = pd.to_numeric(family["요청수량_낱개"], errors="coerce").fillna(0)
+family_ship_piece = pd.to_numeric(family["총출고수량_낱개"], errors="coerce").fillna(0)
+family["매칭출고수량_낱개"] = np.minimum(family_req_piece, family_ship_piece)
+family["초과출고수량_낱개"] = np.maximum(family_ship_piece - family_req_piece, 0)
+family["잔량_낱개"] = np.maximum(family_req_piece - family_ship_piece, 0)
+family["진행률_낱개(%)"] = np.where(family_req_piece > 0, (family["매칭출고수량_낱개"] / family_req_piece) * 100, np.nan)
+
+global_search = str(st.session_state.get("global_search", ""))
 
 # KPI (통합 검색 입력 시 검색결과 기준 요약)
 kpi_source = item.copy()
@@ -474,7 +698,7 @@ if has_global_terms:
     kpi_source = apply_or_search(
         kpi_source,
         global_search,
-        ["제품코드", "품목코드", "P코드", "품명", "상태", "PACK당낱개수", "년", "분기"],
+        ["제품코드", "품목코드", "제품코드(마스터)", "P코드", "브랜드", "품명", "품명검색", "상태", "PACK당낱개수", "년", "분기"],
     )
 
 total_req = float(pd.to_numeric(kpi_source["요청수량_PACK"], errors="coerce").fillna(0).sum())
@@ -482,30 +706,58 @@ total_ship_total = float(pd.to_numeric(kpi_source["총출고수량_EA"], errors=
 total_ship_matched = float(pd.to_numeric(kpi_source["매칭출고수량_EA"], errors="coerce").fillna(0).sum())
 total_ship_excess = float(pd.to_numeric(kpi_source["초과출고수량_EA"], errors="coerce").fillna(0).sum())
 total_remaining = total_req - total_ship_matched
+total_req_piece = float(pd.to_numeric(kpi_source["요청수량_낱개"], errors="coerce").fillna(0).sum())
+total_remaining_piece = float(pd.to_numeric(kpi_source["잔량_낱개"], errors="coerce").fillna(0).sum())
 progress_pct = (total_ship_matched / total_req * 100) if total_req > 0 else 0.0
 
-c1, c2, c3, c4, c5, c6 = st.columns(6)
+c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
 c1.metric("요청수량 (PACK)", f"{total_req:,.0f}")
-c2.metric("매칭출고수량 (EA)", f"{total_ship_matched:,.0f}")
-c3.metric("초과출고수량 (EA)", f"{total_ship_excess:,.0f}")
-c4.metric("총출고수량 (EA)", f"{total_ship_total:,.0f}")
+c2.metric("매칭출고수량 (PACK)", f"{total_ship_matched:,.0f}")
+c3.metric("초과출고수량 (PACK)", f"{total_ship_excess:,.0f}")
+c4.metric("총출고수량 (PACK)", f"{total_ship_total:,.0f}")
 c5.metric("잔량 (요청-매칭)", f"{total_remaining:,.0f}")
-c6.metric("진행률(매칭기준)", f"{progress_pct:,.1f}%")
+c6.metric("출고율(매칭기준)", f"{progress_pct:,.1f}%")
+render_color_metric(
+    c7,
+    "요청수량 (낱개)",
+    f"{total_req_piece:,.0f}",
+    bg_color="#ecfeff",
+    border_color="#67e8f9",
+    label_color="#0e7490",
+    value_color="#0f172a",
+)
+render_color_metric(
+    c8,
+    "미출고 잔량(낱개)",
+    f"{total_remaining_piece:,.0f}",
+    bg_color="#fff1f2",
+    border_color="#fda4af",
+    label_color="#be123c",
+    value_color="#7f1d1d",
+)
 
 item_count = len(kpi_source)
 product_count = kpi_source["제품코드"].astype(str).replace("nan", "").replace("", np.nan).nunique(dropna=True)
 status_counts = kpi_source["상태"].value_counts()
 status_text = ", ".join([f"{k} {v}건" for k, v in status_counts.items()][:4]) if not status_counts.empty else "없음"
 scope_text = "통합 검색 결과 요약" if has_global_terms else "전체 요약"
-st.caption(f"{scope_text} | 품목 {item_count:,}건 | 제품코드 {product_count:,}개 | 상태분포: {status_text}")
+st.caption(f"{scope_text} | 품목 {item_count:,}건 | 제품명코드 {product_count:,}개 | 상태분포: {status_text}")
+
+global_search = st.text_input(
+    "통합 검색 (OR)",
+    value=global_search,
+    key="global_search",
+    placeholder="예: S036, Bandage, 미출고",
+)
+st.caption("쉼표(,) 또는 | 또는 / 로 키워드를 구분하면 OR 조건으로 검색합니다.")
 
 # 탭 구성
-tab1, tab2, tab3 = st.tabs(["제품코드 요약", "품목코드 상세", "분기 누적 추이"])
+tab1, tab2, tab3 = st.tabs(["제품명코드 요약", "품목코드 상세", "분기 누적 추이"])
 
 with tab1:
     show_short_only = st.checkbox("미달(출고중/미출고)만 보기", value=False)
     prod_view = prod.copy()
-    prod_view = apply_or_search(prod_view, global_search, ["제품코드", "P코드", "품명", "상태", "PACK당낱개수", "년", "분기"])
+    prod_view = apply_or_search(prod_view, global_search, ["제품코드", "P코드", "브랜드", "품명", "상태", "PACK당낱개수", "년", "분기"])
     if show_short_only:
         prod_view = prod_view[prod_view["상태"].isin(["미출고", "출고중"])]
 
@@ -515,6 +767,7 @@ with tab1:
         "분기",
         "제품코드",
         "P코드",
+        "브랜드",
         "품명",
         "PACK당낱개수",
         "요청수량_PACK",
@@ -549,15 +802,22 @@ with tab1:
             ],
             pct_cols=["진행률(%)"],
             progress_bar_cols=["진행률(%)"],
+            status_col="상태",
+            positive_alert_cols=["초과출고수량_EA", "초과출고수량_낱개", "잔량", "잔량_낱개"],
         ),
         use_container_width=True,
         hide_index=True,
+        column_config={
+            "상태": st.column_config.TextColumn("상태", width="large"),
+            "진행률(%)": st.column_config.NumberColumn("출고율(%)", format="%.1f"),
+            "제품코드": st.column_config.TextColumn("제품명코드"),
+        },
     )
     excel_data_prod = to_excel_bytes(prod_view[prod_cols], sheet_name="제품코드요약")
     st.download_button(
-        "제품코드 요약 엑셀 다운로드",
+        "제품명코드 요약 엑셀 다운로드",
         data=excel_data_prod,
-        file_name="제품코드_요약_요청대비출고.xlsx",
+        file_name="제품명코드_요약_요청대비출고.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
@@ -606,7 +866,7 @@ with tab1:
         x_enc = alt.X(
             "그래프표시명:N",
             sort="-y",
-            title="제품코드 | 제품명",
+            title="제품명코드 | 제품명",
             axis=alt.Axis(labelAngle=-90, labelPadding=8, labelLimit=220),
         )
         y_enc = alt.Y("잔량:Q", title="잔량", scale=alt.Scale(domain=[0, y_domain_max]))
@@ -614,7 +874,7 @@ with tab1:
             x=x_enc,
             y=y_enc,
             tooltip=[
-                alt.Tooltip("제품코드:N", title="제품코드"),
+                alt.Tooltip("제품코드:N", title="제품명코드"),
                 alt.Tooltip("품명:N", title="품명"),
                 alt.Tooltip("잔량:Q", title="잔량", format=","),
             ],
@@ -630,76 +890,163 @@ with tab1:
             y=alt.Y("잔량:Q", scale=alt.Scale(domain=[0, y_domain_max])),
             text=alt.Text("잔량:Q", format=","),
         )
-        chart_height = max(520, min(1400, 26 * len(chart_df)))
+        # 상위 N개 모드에서 차트가 급격히 작아 보이지 않도록 최소 높이를 더 크게 유지
+        chart_height = max(760, min(1400, 28 * len(chart_df)))
         bar_chart = apply_chart_style(
             (bar + label).properties(
                 height=chart_height,
-                padding={"top": 50, "bottom": 170, "left": 20, "right": 20},
+                padding={"top": 60, "bottom": 190, "left": 20, "right": 20},
             )
         )
         st.altair_chart(bar_chart, use_container_width=True)
 
 with tab2:
-    item_view = item.copy()
-    item_view = apply_or_search(
-        item_view,
-        global_search,
-        ["제품코드", "품목코드", "P코드", "품명", "상태", "PACK당낱개수", "년", "분기"],
+    detail_mode = st.radio(
+        "보기 방식",
+        ["품목코드 상세", "동일제품 통합(낱개기준)"],
+        horizontal=True,
+        key="tab2_detail_mode",
     )
 
-    item_view = item_view.sort_values(["상태", "잔량"], ascending=[True, False])
-    item_cols = [
-        "년",
-        "분기",
-        "제품코드",
-        "P코드",
-        "품목코드",
-        "품명",
-        "PACK당낱개수",
-        "요청수량_PACK",
-        "총출고수량_EA",
-        "매칭출고수량_EA",
-        "초과출고수량_EA",
-        "잔량",
-        "요청수량_낱개",
-        "출고수량_낱개",
-        "매칭출고수량_낱개",
-        "초과출고수량_낱개",
-        "잔량_낱개",
-        "진행률(%)",
-        "상태",
-    ]
-    st.dataframe(
-        format_table(
-            item_view[item_cols],
-            int_cols=[
-                "년",
-                "분기",
-                "요청수량_PACK",
-                "총출고수량_EA",
-                "매칭출고수량_EA",
-                "초과출고수량_EA",
-                "잔량",
-                "요청수량_낱개",
-                "출고수량_낱개",
-                "매칭출고수량_낱개",
-                "초과출고수량_낱개",
-                "잔량_낱개",
-            ],
-            pct_cols=["진행률(%)"],
-            progress_bar_cols=["진행률(%)"],
-        ),
-        use_container_width=True,
-        hide_index=True,
-    )
+    if detail_mode == "품목코드 상세":
+        item_view = item.copy()
+        item_view = apply_or_search(
+            item_view,
+            global_search,
+            ["제품코드", "품목코드", "제품코드(마스터)", "P코드", "브랜드", "품명", "품명검색", "제품군명", "상태", "PACK당낱개수", "년", "분기"],
+        )
 
-    excel_data = to_excel_bytes(item_view[item_cols], sheet_name="품목코드상세")
-    st.download_button(
-        "품목코드 상세 엑셀 다운로드",
-        data=excel_data,
-        file_name="품목코드_요청대비출고_상세.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
+        item_view = item_view.sort_values(["상태", "잔량"], ascending=[True, False])
+        item_cols = [
+            "년",
+            "분기",
+            "제품코드",
+            "P코드",
+            "브랜드",
+            "품목코드",
+            "제품코드(마스터)",
+            "품명",
+            "PACK당낱개수",
+            "요청수량_PACK",
+            "총출고수량_EA",
+            "매칭출고수량_EA",
+            "초과출고수량_EA",
+            "잔량",
+            "요청수량_낱개",
+            "출고수량_낱개",
+            "매칭출고수량_낱개",
+            "초과출고수량_낱개",
+            "잔량_낱개",
+            "진행률(%)",
+            "상태",
+        ]
+        st.dataframe(
+            format_table(
+                item_view[item_cols],
+                int_cols=[
+                    "년",
+                    "분기",
+                    "요청수량_PACK",
+                    "총출고수량_EA",
+                    "매칭출고수량_EA",
+                    "초과출고수량_EA",
+                    "잔량",
+                    "요청수량_낱개",
+                    "출고수량_낱개",
+                    "매칭출고수량_낱개",
+                    "초과출고수량_낱개",
+                    "잔량_낱개",
+                ],
+                pct_cols=["진행률(%)"],
+                progress_bar_cols=["진행률(%)"],
+                status_col="상태",
+                positive_alert_cols=["초과출고수량_EA", "초과출고수량_낱개", "잔량", "잔량_낱개"],
+            ),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "상태": st.column_config.TextColumn("상태", width="large"),
+                "진행률(%)": st.column_config.NumberColumn("출고율(%)", format="%.1f"),
+                "제품코드": st.column_config.TextColumn("제품명코드"),
+                "제품코드(마스터)": st.column_config.TextColumn("제품코드"),
+            },
+        )
+
+        excel_data = to_excel_bytes(item_view[item_cols], sheet_name="품목코드상세")
+        st.download_button(
+            "품목코드 상세 엑셀 다운로드",
+            data=excel_data,
+            file_name="품목코드_요청대비출고_상세.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    else:
+        st.caption("집계 기준: 제품코드(마스터) 우선, 마스터코드가 없는 항목만 P코드 기준으로 통합합니다.")
+        family_view = family.copy()
+        family_view = apply_or_search(
+            family_view,
+            global_search,
+            ["집계기준", "집계키", "제품군명", "대표품명", "제품코드목록", "P코드", "브랜드", "상태", "년", "분기"],
+        )
+        family_view = family_view.sort_values(["상태", "잔량_낱개"], ascending=[True, False])
+        family_cols = [
+            "년",
+            "분기",
+            "집계기준",
+            "집계키",
+            "제품군명",
+            "대표품명",
+            "제품코드목록",
+            "P코드",
+            "브랜드",
+            "요청수량_낱개",
+            "총출고수량_낱개",
+            "매칭출고수량_낱개",
+            "초과출고수량_낱개",
+            "잔량_낱개",
+            "진행률_낱개(%)",
+            "요청수량_PACK",
+            "총출고수량_EA",
+            "매칭출고수량_EA",
+            "초과출고수량_EA",
+            "상태",
+        ]
+        st.dataframe(
+            format_table(
+                family_view[family_cols],
+                int_cols=[
+                    "년",
+                    "분기",
+                    "요청수량_낱개",
+                    "총출고수량_낱개",
+                    "매칭출고수량_낱개",
+                    "초과출고수량_낱개",
+                    "잔량_낱개",
+                    "요청수량_PACK",
+                    "총출고수량_EA",
+                    "매칭출고수량_EA",
+                    "초과출고수량_EA",
+                ],
+                pct_cols=["진행률_낱개(%)"],
+                progress_bar_cols=["진행률_낱개(%)"],
+                status_col="상태",
+                positive_alert_cols=["초과출고수량_EA", "초과출고수량_낱개", "잔량_낱개"],
+            ),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "상태": st.column_config.TextColumn("상태", width="large"),
+                "진행률_낱개(%)": st.column_config.NumberColumn("출고율_낱개(%)", format="%.1f"),
+                "제품코드목록": st.column_config.TextColumn("제품명코드목록"),
+            },
+        )
+
+        family_excel = to_excel_bytes(family_view[family_cols], sheet_name="동일제품통합")
+        st.download_button(
+            "동일제품 통합 엑셀 다운로드",
+            data=family_excel,
+            file_name="동일제품_통합_낱개기준.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
 with tab3:
     st.write("분기 내 일자별 누적 출고량 추이")
