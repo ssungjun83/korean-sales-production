@@ -752,15 +752,35 @@ total_req_piece = float(pd.to_numeric(kpi_source["요청수량_낱개"], errors=
 total_remaining_piece = float(pd.to_numeric(kpi_source["잔량_낱개"], errors="coerce").fillna(0).sum())
 progress_pct = (total_ship_matched / total_req * 100) if total_req > 0 else 0.0
 
-c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
-c1.metric("요청수량 (PACK)", f"{total_req:,.0f}")
-c2.metric("매칭출고수량 (PACK)", f"{total_ship_matched:,.0f}")
-c3.metric("초과출고수량 (PACK)", f"{total_ship_excess:,.0f}")
-c4.metric("총출고수량 (PACK)", f"{total_ship_total:,.0f}")
-c5.metric("잔량 (요청-매칭)", f"{total_remaining:,.0f}")
-c6.metric("출고율(매칭기준)", f"{progress_pct:,.1f}%")
+detail_mode_selected = str(st.session_state.get("tab2_detail_mode", "품목코드 상세"))
+show_unified_inventory_kpi = detail_mode_selected == "동일제품 통합(낱개기준)"
+
+total_stock_qty = 0.0
+total_real_shortage = 0.0
+if show_unified_inventory_kpi:
+    inventory_stock_map_for_kpi, _ = load_inventory_stock(".")
+    family_kpi = family.copy()
+    family_kpi = apply_or_search(
+        family_kpi,
+        global_search,
+        ["집계기준", "집계키", "제품군명", "대표품명", "제품코드목록", "P코드", "브랜드", "상태", "년", "분기"],
+    )
+    family_kpi = family_kpi.merge(inventory_stock_map_for_kpi, left_on="집계키", right_on="제품코드(마스터)", how="left")
+    family_kpi["보유재고"] = pd.to_numeric(family_kpi["보유재고"], errors="coerce").fillna(0)
+    family_kpi["보유재고"] = np.where(family_kpi["집계기준"] == "제품코드(마스터)", family_kpi["보유재고"], 0)
+    family_kpi["실제부족량"] = np.maximum(pd.to_numeric(family_kpi["잔량_낱개"], errors="coerce").fillna(0) - family_kpi["보유재고"], 0)
+    total_stock_qty = float(family_kpi["보유재고"].sum())
+    total_real_shortage = float(family_kpi["실제부족량"].sum())
+
+metric_cols = st.columns(10 if show_unified_inventory_kpi else 8)
+metric_cols[0].metric("요청수량 (PACK)", f"{total_req:,.0f}")
+metric_cols[1].metric("매칭출고수량 (PACK)", f"{total_ship_matched:,.0f}")
+metric_cols[2].metric("초과출고수량 (PACK)", f"{total_ship_excess:,.0f}")
+metric_cols[3].metric("총출고수량 (PACK)", f"{total_ship_total:,.0f}")
+metric_cols[4].metric("잔량 (요청-매칭)", f"{total_remaining:,.0f}")
+metric_cols[5].metric("출고율(매칭기준)", f"{progress_pct:,.1f}%")
 render_color_metric(
-    c7,
+    metric_cols[6],
     "요청수량 (낱개)",
     f"{total_req_piece:,.0f}",
     bg_color="#ecfeff",
@@ -769,7 +789,7 @@ render_color_metric(
     value_color="#0f172a",
 )
 render_color_metric(
-    c8,
+    metric_cols[7],
     "미출고 잔량(낱개)",
     f"{total_remaining_piece:,.0f}",
     bg_color="#fff1f2",
@@ -777,6 +797,25 @@ render_color_metric(
     label_color="#be123c",
     value_color="#7f1d1d",
 )
+if show_unified_inventory_kpi:
+    render_color_metric(
+        metric_cols[8],
+        "보유재고",
+        f"{total_stock_qty:,.0f}",
+        bg_color="#ecfdf5",
+        border_color="#86efac",
+        label_color="#166534",
+        value_color="#14532d",
+    )
+    render_color_metric(
+        metric_cols[9],
+        "실제부족량",
+        f"{total_real_shortage:,.0f}",
+        bg_color="#fff7ed",
+        border_color="#fdba74",
+        label_color="#9a3412",
+        value_color="#7c2d12",
+    )
 
 item_count = len(kpi_source)
 product_count = kpi_source["제품코드"].astype(str).replace("nan", "").replace("", np.nan).nunique(dropna=True)
