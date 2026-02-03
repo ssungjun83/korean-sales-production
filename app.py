@@ -487,8 +487,8 @@ def render_color_metric(
             box-shadow:0 2px 8px rgba(37, 99, 235, 0.08);
             min-height:98px;
         ">
-            <div style="font-size:0.90rem;color:{label_color};font-weight:700;">{label}</div>
-            <div style="font-size:1.85rem;color:{value_color};font-weight:700;line-height:1.2;margin-top:6px;">{value}</div>
+            <div style="font-size:0.86rem;color:{label_color};font-weight:700;">{label}</div>
+            <div style="font-size:1.65rem;color:{value_color};font-weight:700;line-height:1.2;margin-top:6px;">{value}</div>
         </div>
         """,
         unsafe_allow_html=True,
