@@ -768,8 +768,9 @@ if show_unified_inventory_kpi:
     family_kpi = family_kpi.merge(inventory_stock_map_for_kpi, left_on="집계키", right_on="제품코드(마스터)", how="left")
     family_kpi["보유재고"] = pd.to_numeric(family_kpi["보유재고"], errors="coerce").fillna(0)
     family_kpi["보유재고"] = np.where(family_kpi["집계기준"] == "제품코드(마스터)", family_kpi["보유재고"], 0)
-    family_kpi["실제부족량"] = np.maximum(pd.to_numeric(family_kpi["잔량_낱개"], errors="coerce").fillna(0) - family_kpi["보유재고"], 0)
-    total_stock_qty = float(family_kpi["보유재고"].sum())
+    family_kpi["재고반영수량"] = np.minimum(family_kpi["보유재고"], pd.to_numeric(family_kpi["잔량_낱개"], errors="coerce").fillna(0))
+    family_kpi["실제부족량"] = np.maximum(pd.to_numeric(family_kpi["잔량_낱개"], errors="coerce").fillna(0) - family_kpi["재고반영수량"], 0)
+    total_stock_qty = float(family_kpi["재고반영수량"].sum())
     total_real_shortage = float(family_kpi["실제부족량"].sum())
 
 metric_cols = st.columns(10 if show_unified_inventory_kpi else 8)
@@ -800,7 +801,7 @@ render_color_metric(
 if show_unified_inventory_kpi:
     render_color_metric(
         metric_cols[8],
-        "보유재고",
+        "보유재고(반영)",
         f"{total_stock_qty:,.0f}",
         bg_color="#ecfdf5",
         border_color="#86efac",
@@ -1067,7 +1068,8 @@ with tab2:
         family_view = family_view.merge(inventory_stock_map, left_on="집계키", right_on="제품코드(마스터)", how="left")
         family_view["보유재고"] = pd.to_numeric(family_view["보유재고"], errors="coerce").fillna(0)
         family_view["보유재고"] = np.where(family_view["집계기준"] == "제품코드(마스터)", family_view["보유재고"], 0)
-        family_view["실제부족량"] = np.maximum(pd.to_numeric(family_view["잔량_낱개"], errors="coerce").fillna(0) - family_view["보유재고"], 0)
+        family_view["재고반영수량"] = np.minimum(family_view["보유재고"], pd.to_numeric(family_view["잔량_낱개"], errors="coerce").fillna(0))
+        family_view["실제부족량"] = np.maximum(pd.to_numeric(family_view["잔량_낱개"], errors="coerce").fillna(0) - family_view["재고반영수량"], 0)
         if stock_file:
             st.caption(f"재고 반영 파일: `{stock_file}`")
         family_view = apply_or_search(
