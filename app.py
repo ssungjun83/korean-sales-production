@@ -505,7 +505,6 @@ def apply_chart_style(chart: alt.Chart) -> alt.Chart:
 try:
     req_raw, inbound_raw, req_file, inbound_file = load_data(".")
     item_product_master = load_item_product_master_map(".")
-    inventory_stock_map, stock_file = load_inventory_stock(".")
     req = prepare_request(req_raw)
     inbound = prepare_inbound(inbound_raw)
 except Exception as e:
@@ -526,8 +525,6 @@ selected_quarter = st.sidebar.selectbox("분기", quarter_options, index=1 if le
 st.sidebar.markdown("---")
 st.sidebar.write(f"요청 파일: `{req_file}`")
 st.sidebar.write(f"입고 파일: `{inbound_file}`")
-if stock_file:
-    st.sidebar.write(f"재고 파일: `{stock_file}`")
 
 req_f = req.copy()
 in_f = inbound.copy()
@@ -718,10 +715,6 @@ family_ship_piece = pd.to_numeric(family["총출고수량_낱개"], errors="coer
 family["매칭출고수량_낱개"] = np.minimum(family_req_piece, family_ship_piece)
 family["초과출고수량_낱개"] = np.maximum(family_ship_piece - family_req_piece, 0)
 family["잔량_낱개"] = np.maximum(family_req_piece - family_ship_piece, 0)
-family = family.merge(inventory_stock_map, left_on="집계키", right_on="제품코드(마스터)", how="left")
-family["보유재고"] = pd.to_numeric(family["보유재고"], errors="coerce").fillna(0)
-family["보유재고"] = np.where(family["집계기준"] == "제품코드(마스터)", family["보유재고"], 0)
-family["실제부족량"] = np.maximum(family["잔량_낱개"] - family["보유재고"], 0)
 family["진행률_낱개(%)"] = np.where(family_req_piece > 0, (family["매칭출고수량_낱개"] / family_req_piece) * 100, np.nan)
 
 global_search = str(st.session_state.get("global_search", ""))
@@ -1017,6 +1010,13 @@ with tab2:
     else:
         st.caption("집계 기준: 제품코드(마스터) 우선, 마스터코드가 없는 항목만 P코드 기준으로 통합합니다.")
         family_view = family.copy()
+        inventory_stock_map, stock_file = load_inventory_stock(".")
+        family_view = family_view.merge(inventory_stock_map, left_on="집계키", right_on="제품코드(마스터)", how="left")
+        family_view["보유재고"] = pd.to_numeric(family_view["보유재고"], errors="coerce").fillna(0)
+        family_view["보유재고"] = np.where(family_view["집계기준"] == "제품코드(마스터)", family_view["보유재고"], 0)
+        family_view["실제부족량"] = np.maximum(pd.to_numeric(family_view["잔량_낱개"], errors="coerce").fillna(0) - family_view["보유재고"], 0)
+        if stock_file:
+            st.caption(f"재고 반영 파일: `{stock_file}`")
         family_view = apply_or_search(
             family_view,
             global_search,
