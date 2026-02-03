@@ -450,6 +450,20 @@ def to_excel_bytes(df: pd.DataFrame, sheet_name: str = "data") -> bytes:
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name=sheet_name)
+        ws = writer.sheets[sheet_name]
+
+        # 숫자 컬럼은 엑셀에서 천단위 구분기호 포맷으로 저장
+        for col_idx, col_name in enumerate(df.columns, start=1):
+            series = df[col_name]
+            if not pd.api.types.is_numeric_dtype(series):
+                continue
+
+            num_fmt = "#,##0.0" if "(%)" in str(col_name) else "#,##0"
+            for row_idx in range(2, len(df) + 2):
+                cell = ws.cell(row=row_idx, column=col_idx)
+                if cell.value is None:
+                    continue
+                cell.number_format = num_fmt
     buffer.seek(0)
     return buffer.getvalue()
 
