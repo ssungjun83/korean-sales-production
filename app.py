@@ -252,6 +252,34 @@ def load_item_product_master_map(base_dir: str) -> pd.DataFrame:
     return pd.DataFrame(columns=["품목코드", "제품코드(마스터)"])
 
 
+@st.cache_data
+def load_inventory_stock(base_dir: str) -> tuple[pd.DataFrame, str]:
+    candidates = list(Path(base_dir).glob("*재고장*.xlsx"))
+    if not candidates:
+        return pd.DataFrame(columns=["제품코드(마스터)", "보유재고"]), ""
+
+    for file in candidates:
+        try:
+            df = pd.read_excel(file)
+        except Exception:
+            continue
+
+        code_col = find_col(df, ["품목코드"])
+        stock_col = find_col(df, ["재고", "재고수량", "현재고"])
+        if not code_col or not stock_col:
+            continue
+
+        stock = df[[code_col, stock_col]].copy()
+        stock.columns = ["제품코드(마스터)", "보유재고"]
+        stock["제품코드(마스터)"] = normalize_code(stock["제품코드(마스터)"])
+        stock["보유재고"] = to_numeric(stock["보유재고"])
+        stock = stock[stock["제품코드(마스터)"] != ""]
+        stock = stock.groupby("제품코드(마스터)", as_index=False)["보유재고"].sum()
+        return stock, file.name
+
+    return pd.DataFrame(columns=["제품코드(마스터)", "보유재고"]), ""
+
+
 def prepare_request(df: pd.DataFrame) -> pd.DataFrame:
     year_col = find_col(df, ["년"])
     quarter_col = find_col(df, ["분기"])
@@ -477,6 +505,7 @@ def apply_chart_style(chart: alt.Chart) -> alt.Chart:
 try:
     req_raw, inbound_raw, req_file, inbound_file = load_data(".")
     item_product_master = load_item_product_master_map(".")
+    inventory_stock_map, stock_file = load_inventory_stock(".")
     req = prepare_request(req_raw)
     inbound = prepare_inbound(inbound_raw)
 except Exception as e:
@@ -497,6 +526,8 @@ selected_quarter = st.sidebar.selectbox("분기", quarter_options, index=1 if le
 st.sidebar.markdown("---")
 st.sidebar.write(f"요청 파일: `{req_file}`")
 st.sidebar.write(f"입고 파일: `{inbound_file}`")
+if stock_file:
+    st.sidebar.write(f"재고 파일: `{stock_file}`")
 
 req_f = req.copy()
 in_f = inbound.copy()
@@ -687,6 +718,10 @@ family_ship_piece = pd.to_numeric(family["총출고수량_낱개"], errors="coer
 family["매칭출고수량_낱개"] = np.minimum(family_req_piece, family_ship_piece)
 family["초과출고수량_낱개"] = np.maximum(family_ship_piece - family_req_piece, 0)
 family["잔량_낱개"] = np.maximum(family_req_piece - family_ship_piece, 0)
+family = family.merge(inventory_stock_map, left_on="집계키", right_on="제품코드(마스터)", how="left")
+family["보유재고"] = pd.to_numeric(family["보유재고"], errors="coerce").fillna(0)
+family["보유재고"] = np.where(family["집계기준"] == "제품코드(마스터)", family["보유재고"], 0)
+family["실제부족량"] = np.maximum(family["잔량_낱개"] - family["보유재고"], 0)
 family["진행률_낱개(%)"] = np.where(family_req_piece > 0, (family["매칭출고수량_낱개"] / family_req_piece) * 100, np.nan)
 
 global_search = str(st.session_state.get("global_search", ""))
@@ -1003,6 +1038,8 @@ with tab2:
             "매칭출고수량_낱개",
             "초과출고수량_낱개",
             "잔량_낱개",
+            "보유재고",
+            "실제부족량",
             "진행률_낱개(%)",
             "요청수량_PACK",
             "총출고수량_EA",
@@ -1021,6 +1058,8 @@ with tab2:
                     "매칭출고수량_낱개",
                     "초과출고수량_낱개",
                     "잔량_낱개",
+                    "보유재고",
+                    "실제부족량",
                     "요청수량_PACK",
                     "총출고수량_EA",
                     "매칭출고수량_EA",
@@ -1029,7 +1068,7 @@ with tab2:
                 pct_cols=["진행률_낱개(%)"],
                 progress_bar_cols=["진행률_낱개(%)"],
                 status_col="상태",
-                positive_alert_cols=["초과출고수량_EA", "초과출고수량_낱개", "잔량_낱개"],
+                positive_alert_cols=["초과출고수량_EA", "초과출고수량_낱개", "잔량_낱개", "실제부족량"],
             ),
             use_container_width=True,
             hide_index=True,
