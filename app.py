@@ -188,6 +188,24 @@ def normalize_key_value(value: object) -> str:
     return s
 
 
+def split_master_codes(value: object) -> list[str]:
+    text = normalize_key_value(value)
+    if not text:
+        return []
+    parts = [p.strip() for p in str(text).split(",") if p and p.strip()]
+    codes = []
+    for part in parts:
+        if part.startswith("외"):
+            continue
+        if part not in codes:
+            codes.append(part)
+    return codes
+
+
+def calc_stock_sum_for_master_codes(master_code_value: object, stock_map: dict[str, float]) -> float:
+    return float(sum(stock_map.get(code, 0.0) for code in split_master_codes(master_code_value)))
+
+
 @st.cache_data
 def load_data(base_dir: str) -> tuple[pd.DataFrame, pd.DataFrame, str, str]:
     files = list(Path(base_dir).glob("*.xlsx"))
@@ -759,15 +777,22 @@ total_stock_qty = 0.0
 total_real_shortage = 0.0
 if show_unified_inventory_kpi:
     inventory_stock_map_for_kpi, _ = load_inventory_stock(".")
+    inventory_stock_dict_for_kpi = (
+        inventory_stock_map_for_kpi.set_index("제품코드(마스터)")["보유재고"].to_dict()
+        if not inventory_stock_map_for_kpi.empty
+        else {}
+    )
     family_kpi = family.copy()
     family_kpi = apply_or_search(
         family_kpi,
         global_search,
         ["집계기준", "집계키", "제품군명", "대표품명", "제품코드목록", "P코드", "브랜드", "상태", "년", "분기"],
     )
-    family_kpi = family_kpi.merge(inventory_stock_map_for_kpi, left_on="집계키", right_on="제품코드(마스터)", how="left")
-    family_kpi["보유재고"] = pd.to_numeric(family_kpi["보유재고"], errors="coerce").fillna(0)
-    family_kpi["보유재고"] = np.where(family_kpi["집계기준"] == "제품코드(마스터)", family_kpi["보유재고"], 0)
+    family_kpi["보유재고"] = np.where(
+        family_kpi["집계기준"] == "제품코드(마스터)",
+        family_kpi["집계키"].apply(lambda v: calc_stock_sum_for_master_codes(v, inventory_stock_dict_for_kpi)),
+        0,
+    )
     family_kpi["재고반영수량"] = np.minimum(family_kpi["보유재고"], pd.to_numeric(family_kpi["잔량_낱개"], errors="coerce").fillna(0))
     family_kpi["실제부족량"] = np.maximum(pd.to_numeric(family_kpi["잔량_낱개"], errors="coerce").fillna(0) - family_kpi["재고반영수량"], 0)
     total_stock_qty = float(family_kpi["재고반영수량"].sum())
@@ -1065,9 +1090,16 @@ with tab2:
         st.caption("집계 기준: 제품코드(마스터) 우선, 마스터코드가 없는 항목만 P코드 기준으로 통합합니다.")
         family_view = family.copy()
         inventory_stock_map, stock_file = load_inventory_stock(".")
-        family_view = family_view.merge(inventory_stock_map, left_on="집계키", right_on="제품코드(마스터)", how="left")
-        family_view["보유재고"] = pd.to_numeric(family_view["보유재고"], errors="coerce").fillna(0)
-        family_view["보유재고"] = np.where(family_view["집계기준"] == "제품코드(마스터)", family_view["보유재고"], 0)
+        inventory_stock_dict = (
+            inventory_stock_map.set_index("제품코드(마스터)")["보유재고"].to_dict()
+            if not inventory_stock_map.empty
+            else {}
+        )
+        family_view["보유재고"] = np.where(
+            family_view["집계기준"] == "제품코드(마스터)",
+            family_view["집계키"].apply(lambda v: calc_stock_sum_for_master_codes(v, inventory_stock_dict)),
+            0,
+        )
         family_view["재고반영수량"] = np.minimum(family_view["보유재고"], pd.to_numeric(family_view["잔량_낱개"], errors="coerce").fillna(0))
         family_view["실제부족량"] = np.maximum(pd.to_numeric(family_view["잔량_낱개"], errors="coerce").fillna(0) - family_view["재고반영수량"], 0)
         if stock_file:
