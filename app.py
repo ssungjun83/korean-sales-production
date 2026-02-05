@@ -188,6 +188,18 @@ def normalize_key_value(value: object) -> str:
     return s
 
 
+def normalize_product_type(value: object) -> str:
+    text = normalize_key_value(value)
+    if not text:
+        return "미지정"
+    lowered = text.lower()
+    if text == "본품" or lowered in {"정규품", "정규"}:
+        return "정규품"
+    if text == "샘플" or lowered in {"sample"}:
+        return "샘플"
+    return text
+
+
 def split_master_codes(value: object) -> list[str]:
     text = normalize_key_value(value)
     if not text:
@@ -305,6 +317,7 @@ def prepare_request(df: pd.DataFrame) -> pd.DataFrame:
     name_col = find_col(df, ["품명"])
     pcode_col = find_col(df, ["P 코드", "P코드"])
     brand_col = find_col(df, ["브랜드", "BRAND", "Brand"])
+    type_col = find_col(df, ["구분", "구 분"])
 
     if not (year_col and quarter_col and item_col):
         raise ValueError("요청 파일에 필수 컬럼(년/분기/품목코드)이 없습니다.")
@@ -322,6 +335,7 @@ def prepare_request(df: pd.DataFrame) -> pd.DataFrame:
     req["제품코드"] = req["품목코드"].str[:4]
     req["P코드"] = req[pcode_col] if pcode_col else ""
     req["브랜드"] = req[brand_col] if brand_col else ""
+    req["구분"] = req[type_col].apply(normalize_product_type) if type_col else "미지정"
     req["품명"] = req[name_col] if name_col else ""
     req["제품군명"] = req["품명"].apply(normalize_product_family_name)
     req["PACK당낱개수"] = req["품명"].apply(extract_pack_count)
@@ -332,7 +346,7 @@ def prepare_request(df: pd.DataFrame) -> pd.DataFrame:
         qty_numeric = req[qty_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
         req["요청수량_PACK"] = qty_numeric.sum(axis=1)
 
-    return req[["년", "분기", "품목코드", "제품코드", "P코드", "브랜드", "품명", "제품군명", "PACK당낱개수", "요청수량_PACK"]]
+    return req[["년", "분기", "품목코드", "제품코드", "P코드", "브랜드", "구분", "품명", "제품군명", "PACK당낱개수", "요청수량_PACK"]]
 
 
 def prepare_inbound(df: pd.DataFrame) -> pd.DataFrame:
@@ -352,13 +366,14 @@ def prepare_inbound(df: pd.DataFrame) -> pd.DataFrame:
     inbound["품목코드"] = normalize_code(inbound[item_col])
     inbound["제품코드"] = inbound["품목코드"].str[:4]
     inbound["브랜드"] = ""
+    inbound["구분"] = "미지정"
     inbound["품명"] = inbound[name_col] if name_col else ""
     inbound["제품군명"] = inbound["품명"].apply(normalize_product_family_name)
     inbound["PACK당낱개수"] = inbound["품명"].apply(extract_pack_count)
     inbound["출고수량_EA"] = to_numeric(inbound[qty_col])
     inbound["이동일자"] = pd.to_datetime(inbound[date_col], errors="coerce") if date_col else pd.NaT
 
-    return inbound[["년", "분기", "품목코드", "제품코드", "브랜드", "품명", "제품군명", "PACK당낱개수", "이동일자", "출고수량_EA"]]
+    return inbound[["년", "분기", "품목코드", "제품코드", "브랜드", "구분", "품명", "제품군명", "PACK당낱개수", "이동일자", "출고수량_EA"]]
 
 
 def status_label(request_qty: pd.Series, shipped_qty: pd.Series) -> pd.Series:
@@ -549,10 +564,12 @@ all_quarters = sorted(pd.concat([req["분기"].dropna(), inbound["분기"].dropn
 
 year_options = ["전체"] + all_years
 quarter_options = ["전체"] + all_quarters
+type_options = ["전체", "정규품", "샘플"]
 
 st.sidebar.header("조회 조건")
 selected_year = st.sidebar.selectbox("년", year_options, index=1 if len(year_options) > 1 else 0)
 selected_quarter = st.sidebar.selectbox("분기", quarter_options, index=1 if len(quarter_options) > 1 else 0)
+selected_type = st.sidebar.selectbox("구분", type_options, index=0)
 
 st.sidebar.markdown("---")
 st.sidebar.write(f"요청 파일: `{req_file}`")
@@ -566,6 +583,13 @@ if selected_year != "전체":
 if selected_quarter != "전체":
     req_f = req_f[req_f["분기"] == selected_quarter]
     in_f = in_f[in_f["분기"] == selected_quarter]
+if selected_type != "전체":
+    req_f = req_f[req_f["구분"] == selected_type]
+    req_keys = req_f[["년", "분기", "품목코드"]].drop_duplicates()
+    if req_keys.empty:
+        in_f = in_f.iloc[0:0].copy()
+    else:
+        in_f = in_f.merge(req_keys.assign(_keep=1), on=["년", "분기", "품목코드"], how="inner").drop(columns=["_keep"])
 
 # PACK 기준 수량을 낱개 기준으로 환산
 req_f["요청수량_낱개환산"] = req_f["요청수량_PACK"] * req_f["PACK당낱개수"]
@@ -591,6 +615,13 @@ brand_prod = (
 )
 prod = prod.merge(brand_prod, on=["년", "분기", "제품코드"], how="left")
 prod["브랜드"] = prod["브랜드"].fillna("").astype(str).replace("0", "")
+type_prod = (
+    req_f.groupby(["년", "분기", "제품코드"], as_index=False)["구분"]
+    .apply(summarize_codes)
+    .rename(columns={"구분": "구분"})
+)
+prod = prod.merge(type_prod, on=["년", "분기", "제품코드"], how="left")
+prod["구분"] = prod["구분"].fillna("").astype(str).replace("0", "")
 
 # 제품명코드 요약의 품명은 요청 파일 기준으로만 표시
 name_src = req_f[["년", "분기", "제품코드", "품명"]].copy()
@@ -664,6 +695,13 @@ brand_item = (
 )
 item = item.merge(brand_item, on=["년", "분기", "품목코드"], how="left")
 item["브랜드"] = item["브랜드"].fillna("").astype(str).replace("0", "")
+type_item = (
+    req_f.groupby(["년", "분기", "품목코드"], as_index=False)["구분"]
+    .apply(summarize_codes)
+    .rename(columns={"구분": "구분"})
+)
+item = item.merge(type_item, on=["년", "분기", "품목코드"], how="left")
+item["구분"] = item["구분"].fillna("").astype(str).replace("0", "")
 
 pack_src_item = pd.concat(
     [
@@ -729,6 +767,7 @@ family = (
         제품코드목록=("제품코드", summarize_codes),
         P코드=("P코드", summarize_codes),
         브랜드=("브랜드", summarize_codes),
+        구분=("구분", summarize_codes),
         요청수량_PACK=("요청수량_PACK", "sum"),
         총출고수량_EA=("총출고수량_EA", "sum"),
         요청수량_낱개=("요청수량_낱개", "sum"),
@@ -740,6 +779,7 @@ family["대표품명"] = family["대표품명"].apply(normalize_key_value)
 family["제품코드목록"] = family["제품코드목록"].apply(normalize_key_value)
 family["P코드"] = family["P코드"].apply(normalize_key_value)
 family["브랜드"] = family["브랜드"].apply(normalize_key_value)
+family["구분"] = family["구분"].apply(normalize_key_value)
 
 family = add_progress_columns(family, "요청수량_PACK", "총출고수량_EA")
 family_req_piece = pd.to_numeric(family["요청수량_낱개"], errors="coerce").fillna(0)
@@ -758,7 +798,7 @@ if has_global_terms:
     kpi_source = apply_or_search(
         kpi_source,
         global_search,
-        ["제품코드", "품목코드", "제품코드(마스터)", "P코드", "브랜드", "품명", "품명검색", "상태", "PACK당낱개수", "년", "분기"],
+        ["제품코드", "품목코드", "제품코드(마스터)", "P코드", "브랜드", "구분", "품명", "품명검색", "상태", "PACK당낱개수", "년", "분기"],
     )
 
 total_req = float(pd.to_numeric(kpi_source["요청수량_PACK"], errors="coerce").fillna(0).sum())
@@ -786,7 +826,7 @@ if show_unified_inventory_kpi:
     family_kpi = apply_or_search(
         family_kpi,
         global_search,
-        ["집계기준", "집계키", "제품군명", "대표품명", "제품코드목록", "P코드", "브랜드", "상태", "년", "분기"],
+        ["집계기준", "집계키", "제품군명", "대표품명", "제품코드목록", "P코드", "브랜드", "구분", "상태", "년", "분기"],
     )
     family_kpi["보유재고"] = np.where(
         family_kpi["집계기준"] == "제품코드(마스터)",
@@ -848,7 +888,8 @@ product_count = kpi_source["제품코드"].astype(str).replace("nan", "").replac
 status_counts = kpi_source["상태"].value_counts()
 status_text = ", ".join([f"{k} {v}건" for k, v in status_counts.items()][:4]) if not status_counts.empty else "없음"
 scope_text = "통합 검색 결과 요약" if has_global_terms else "전체 요약"
-st.caption(f"{scope_text} | 품목 {item_count:,}건 | 제품명코드 {product_count:,}개 | 상태분포: {status_text}")
+type_scope_text = f" | 구분필터: {selected_type}" if selected_type != "전체" else ""
+st.caption(f"{scope_text}{type_scope_text} | 품목 {item_count:,}건 | 제품명코드 {product_count:,}개 | 상태분포: {status_text}")
 
 global_search = st.text_input(
     "통합 검색 (OR)",
@@ -864,7 +905,7 @@ tab1, tab2, tab3 = st.tabs(["제품명코드 요약", "품목코드 상세", "�
 with tab1:
     show_short_only = st.checkbox("미달(출고중/미출고)만 보기", value=False)
     prod_view = prod.copy()
-    prod_view = apply_or_search(prod_view, global_search, ["제품코드", "P코드", "브랜드", "품명", "상태", "PACK당낱개수", "년", "분기"])
+    prod_view = apply_or_search(prod_view, global_search, ["제품코드", "P코드", "브랜드", "구분", "품명", "상태", "PACK당낱개수", "년", "분기"])
     if show_short_only:
         prod_view = prod_view[prod_view["상태"].isin(["미출고", "출고중"])]
 
@@ -875,6 +916,7 @@ with tab1:
         "제품코드",
         "P코드",
         "브랜드",
+        "구분",
         "품명",
         "PACK당낱개수",
         "요청수량_PACK",
@@ -1020,7 +1062,7 @@ with tab2:
         item_view = apply_or_search(
             item_view,
             global_search,
-            ["제품코드", "품목코드", "제품코드(마스터)", "P코드", "브랜드", "품명", "품명검색", "제품군명", "상태", "PACK당낱개수", "년", "분기"],
+            ["제품코드", "품목코드", "제품코드(마스터)", "P코드", "브랜드", "구분", "품명", "품명검색", "제품군명", "상태", "PACK당낱개수", "년", "분기"],
         )
 
         item_view = item_view.sort_values(["상태", "잔량"], ascending=[True, False])
@@ -1030,6 +1072,7 @@ with tab2:
             "제품코드",
             "P코드",
             "브랜드",
+            "구분",
             "품목코드",
             "제품코드(마스터)",
             "품명",
@@ -1107,7 +1150,7 @@ with tab2:
         family_view = apply_or_search(
             family_view,
             global_search,
-            ["집계기준", "집계키", "제품군명", "대표품명", "제품코드목록", "P코드", "브랜드", "상태", "년", "분기"],
+            ["집계기준", "집계키", "제품군명", "대표품명", "제품코드목록", "P코드", "브랜드", "구분", "상태", "년", "분기"],
         )
         family_view = family_view.sort_values(["상태", "잔량_낱개"], ascending=[True, False])
         family_cols = [
@@ -1120,6 +1163,7 @@ with tab2:
             "제품코드목록",
             "P코드",
             "브랜드",
+            "구분",
             "요청수량_낱개",
             "총출고수량_낱개",
             "매칭출고수량_낱개",
