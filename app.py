@@ -569,7 +569,7 @@ type_options = ["전체", "정규품", "샘플"]
 st.sidebar.header("조회 조건")
 selected_year = st.sidebar.selectbox("년", year_options, index=1 if len(year_options) > 1 else 0)
 selected_quarter = st.sidebar.selectbox("분기", quarter_options, index=1 if len(quarter_options) > 1 else 0)
-selected_type = st.sidebar.selectbox("구분", type_options, index=0)
+selected_type = st.sidebar.selectbox("구분", type_options, index=1)
 
 st.sidebar.markdown("---")
 st.sidebar.write(f"요청 파일: `{req_file}`")
