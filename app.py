@@ -218,8 +218,19 @@ def calc_stock_sum_for_master_codes(master_code_value: object, stock_map: dict[s
     return float(sum(stock_map.get(code, 0.0) for code in split_master_codes(master_code_value)))
 
 
+def build_data_cache_token(base_dir: str) -> str:
+    parts = []
+    for p in sorted(Path(base_dir).glob("*.xlsx"), key=lambda x: x.name):
+        try:
+            stat = p.stat()
+            parts.append(f"{p.name}:{stat.st_mtime_ns}:{stat.st_size}")
+        except OSError:
+            continue
+    return "|".join(parts)
+
+
 @st.cache_data
-def load_data(base_dir: str) -> tuple[pd.DataFrame, pd.DataFrame, str, str]:
+def load_data(base_dir: str, cache_token: str = "") -> tuple[pd.DataFrame, pd.DataFrame, str, str]:
     files = list(Path(base_dir).glob("*.xlsx"))
     if not files:
         raise FileNotFoundError("현재 폴더에 xlsx 파일이 없습니다.")
@@ -250,7 +261,7 @@ def load_data(base_dir: str) -> tuple[pd.DataFrame, pd.DataFrame, str, str]:
 
 
 @st.cache_data
-def load_item_product_master_map(base_dir: str) -> pd.DataFrame:
+def load_item_product_master_map(base_dir: str, cache_token: str = "") -> pd.DataFrame:
     candidates = list(Path(base_dir).glob("*마스터 데이터*.xlsx"))
     if not candidates:
         return pd.DataFrame(columns=["품목코드", "제품코드(마스터)"])
@@ -283,7 +294,7 @@ def load_item_product_master_map(base_dir: str) -> pd.DataFrame:
 
 
 @st.cache_data
-def load_inventory_stock(base_dir: str) -> tuple[pd.DataFrame, str]:
+def load_inventory_stock(base_dir: str, cache_token: str = "") -> tuple[pd.DataFrame, str]:
     candidates = list(Path(base_dir).glob("*재고장*.xlsx"))
     if not candidates:
         return pd.DataFrame(columns=["제품코드(마스터)", "보유재고"]), ""
@@ -550,8 +561,9 @@ def apply_chart_style(chart: alt.Chart) -> alt.Chart:
 
 
 try:
-    req_raw, inbound_raw, req_file, inbound_file = load_data(".")
-    item_product_master = load_item_product_master_map(".")
+    data_cache_token = build_data_cache_token(".")
+    req_raw, inbound_raw, req_file, inbound_file = load_data(".", data_cache_token)
+    item_product_master = load_item_product_master_map(".", data_cache_token)
     req = prepare_request(req_raw)
     inbound = prepare_inbound(inbound_raw)
 except Exception as e:
@@ -816,7 +828,7 @@ show_unified_inventory_kpi = detail_mode_selected == "동일제품 통합(낱개
 total_stock_qty = 0.0
 total_real_shortage = 0.0
 if show_unified_inventory_kpi:
-    inventory_stock_map_for_kpi, _ = load_inventory_stock(".")
+    inventory_stock_map_for_kpi, _ = load_inventory_stock(".", data_cache_token)
     inventory_stock_dict_for_kpi = (
         inventory_stock_map_for_kpi.set_index("제품코드(마스터)")["보유재고"].to_dict()
         if not inventory_stock_map_for_kpi.empty
@@ -1132,7 +1144,7 @@ with tab2:
     else:
         st.caption("집계 기준: 제품코드(마스터) 우선, 마스터코드가 없는 항목만 P코드 기준으로 통합합니다.")
         family_view = family.copy()
-        inventory_stock_map, stock_file = load_inventory_stock(".")
+        inventory_stock_map, stock_file = load_inventory_stock(".", data_cache_token)
         inventory_stock_dict = (
             inventory_stock_map.set_index("제품코드(마스터)")["보유재고"].to_dict()
             if not inventory_stock_map.empty
