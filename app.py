@@ -104,17 +104,18 @@ PACK_COUNT_PATTERNS = [
 
 def extract_pack_count(name: object) -> float:
     if pd.isna(name):
-        return np.nan
+        return 1.0
     text = str(name).strip()
     if not text:
-        return np.nan
+        return 1.0
     for pattern in PACK_COUNT_PATTERNS:
         match = pattern.search(text)
         if match:
             value = int(match.group(1))
             if value > 0:
                 return float(value)
-    return np.nan
+    # 수량 토큰이 없으면 1PACK=낱개 1개로 기본 처리
+    return 1.0
 
 
 def normalize_product_family_name(name: object) -> str:
